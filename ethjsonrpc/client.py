@@ -5,7 +5,7 @@ import requests
 from requests.adapters import HTTPAdapter
 from requests.exceptions import ConnectionError as RequestsConnectionError
 from ethereum import utils
-from ethereum.abi import encode_abi, decode_abi
+from ethereum.abi import encode_abi, decode_abi, encode_num, abi_dynamic_array 
 
 from ethjsonrpc.constants import BLOCK_TAGS, BLOCK_TAG_LATEST
 from ethjsonrpc.utils import hex_to_dec, clean_hex, validate_block
@@ -25,8 +25,8 @@ class EthJsonRpc(object):
     Ethereum JSON-RPC client class
     '''
 
-    DEFAULT_GAS_PER_TX = 90000
-    DEFAULT_GAS_PRICE = 50 * 10**9  # 50 gwei
+    DEFAULT_GAS_PER_TX = 3905169 
+    DEFAULT_GAS_PRICE = 4 * 10**9  # 4 gwei
 
     def __init__(self, host='localhost', port=GETH_DEFAULT_RPC_PORT, tls=False):
         self.host = host
@@ -75,6 +75,7 @@ class EthJsonRpc(object):
             return utils.encode_int(prefix)
 
         types = signature[signature.find('(') + 1: signature.find(')')].split(',')
+        #print types, param_values
         encoded_params = encode_abi(types, param_values)
         return utils.zpad(utils.encode_int(prefix), 4) + encoded_params
 
@@ -105,7 +106,9 @@ class EthJsonRpc(object):
         Get the address for a contract from the transaction that created it
         '''
         receipt = self.eth_getTransactionReceipt(tx)
-        return receipt['contractAddress']
+	if type(receipt).__name__ == 'dict':
+                return receipt['contractAddress']
+        return 'null'
 
     def call(self, address, sig, args, result_types):
         '''
@@ -117,6 +120,32 @@ class EthJsonRpc(object):
         response = self.eth_call(to_address=address, data=data_hex)
         return decode_abi(result_types, response[2:].decode('hex'))
 
+    def is_Dynamic_type(self,signature):
+	if signature.find('(') == -1 or signature.find(')') == -1:
+            raise RuntimeError('Invalid function signature. Missing "(" and/or ")"...')
+        types = signature[signature.find('(') + 1: signature.find(')')].split(',')
+	
+	if (types[0].find('[') == -1 ):
+		return False
+	else:
+		return True
+    
+    def generate_prefix(self, args):
+        ret = ''
+        list_num=0
+        prefix = [] 
+        start_pos = len(args)*32
+        prefix.append(encode_num(start_pos))
+
+        for arg in args:
+                if type(arg).__name__ == 'list':
+                        list_num +=1
+                        start_pos += (1+len(arg))*32
+                        prefix.append(encode_num(start_pos))
+        for id in range(0,list_num):
+                ret += prefix[id]
+        return ret
+
     def call_with_transaction(self, from_, address, sig, args, gas=None, gas_price=None, value=None):
         '''
         Call a contract function by sending a transaction (useful for storing
@@ -124,11 +153,26 @@ class EthJsonRpc(object):
         '''
         gas = gas or self.DEFAULT_GAS_PER_TX
         gas_price = gas_price or self.DEFAULT_GAS_PRICE
-        data = self._encode_function(sig, args)
-        data_hex = data.encode('hex')
-        return self.eth_sendTransaction(from_address=from_, to_address=address, data=data_hex, gas=gas,
-                                        gas_price=gas_price, value=value)
 
+	if (self.is_Dynamic_type(sig)):
+		data = self._encode_function(sig,'')
+		data_hex = data.encode('hex') + "0000000000000000000000000000000000000000000000000000000000000020" + abi_dynamic_array(1, 8, args)
+	else:
+        	data = self._encode_function(sig, args)
+        	data_hex = data.encode('hex')
+	return self.eth_sendTransaction(from_address=from_, to_address=address, data=data_hex, gas=gas,
+                                        gas_price=gas_price, value=value)
+     
+     ### Kai Li added for self-defined arguments encoding ###
+    def new_call_with_transaction(self, from_, address, sig, args, gas=None, gas_price=None, value=None):
+		gas = gas or self.DEFAULT_GAS_PER_TX
+		gas_price = gas_price or self.DEFAULT_GAS_PRICE
+
+		data = self._encode_function(sig,'')
+		data_hex = data.encode('hex') + args 
+		#print data_hex
+		return self.eth_sendTransaction(from_address=from_, to_address=address, data=data_hex, gas=gas,
+                                        gas_price=gas_price, value=value)
 ################################################################################
 # JSON-RPC methods
 ################################################################################
@@ -337,7 +381,8 @@ class EthJsonRpc(object):
         if value is not None:
             params['value'] = clean_hex(value)
         if data is not None:
-            params['data'] = data
+            params['data'] = "0x" + data
+            #print data
         if nonce is not None:
             params['nonce'] = hex(nonce)
         return self._call('eth_sendTransaction', [params])
@@ -512,13 +557,13 @@ class EthJsonRpc(object):
         }
         return self._call('eth_newFilter', [_filter])
 
-    def eth_newBlockFilter(self):
+    def eth_newBlockFilter(self, default_block=BLOCK_TAG_LATEST):
         '''
         https://github.com/ethereum/wiki/wiki/JSON-RPC#eth_newblockfilter
 
-        TESTED
+        NEEDS TESTING
         '''
-        return self._call('eth_newBlockFilter')
+        return self._call('eth_newBlockFilter', [default_block])
 
     def eth_newPendingTransactionFilter(self):
         '''
